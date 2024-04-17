@@ -1,3 +1,4 @@
+import logging
 import time
 from collections import defaultdict
 
@@ -7,9 +8,9 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 from sklearn.cluster import KMeans
-import logging
-from ._utils import make_dataset, cov, custom_collate, print_progress
+
 from ...utils.monitor import EarlyStopping
+from ._utils import cov, custom_collate, make_dataset, print_progress
 
 
 class scPoliTrainer:
@@ -87,7 +88,7 @@ class scPoliTrainer:
         cell_type_keys: str = None,
         batch_size: int = 128,
         alpha_epoch_anneal: int = None,
-        alpha_kl: float = 1.,
+        alpha_kl: float = 1.0,
         use_early_stopping: bool = True,
         reload_best: bool = True,
         early_stopping_kwargs: dict = None,
@@ -101,6 +102,8 @@ class scPoliTrainer:
         p_prototype_loss: float = 2,
         prototype_training: bool = True,
         unlabeled_prototype_training: bool = True,
+        logger=None,
+        log_prefix: str = "",
         **kwargs,
     ):
         self.adata = adata
@@ -116,7 +119,9 @@ class scPoliTrainer:
 
         self.alpha_kl = alpha_kl
 
-        early_stopping_kwargs = (early_stopping_kwargs if early_stopping_kwargs else dict())
+        early_stopping_kwargs = (
+            early_stopping_kwargs if early_stopping_kwargs else dict()
+        )
 
         self.n_samples = kwargs.pop("n_samples", None)
         self.train_frac = kwargs.pop("train_frac", 0.9)
@@ -135,18 +140,17 @@ class scPoliTrainer:
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.DEBUG)
 
-
         torch.manual_seed(self.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(self.seed)
             self.model.cuda()
             logger.info("GPU available: True, GPU used: True")
-            #print("GPU available: True, GPU used: True")
+            # print("GPU available: True, GPU used: True")
         else:
             logger.info("GPU available: False")
-            #print("GPU available: False")
+            # print("GPU available: False")
 
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.epoch = -1
         self.n_epochs = None
@@ -196,8 +200,8 @@ class scPoliTrainer:
         self.best_prototypes_labeled_cov = None  # cache for ES
         self.best_prototypes_unlabeled = None  # cache for ES
         self.prototype_optim = None  # prototype optimizer
-        
-        #set indices for labeled data
+
+        # set indices for labeled data
         if labeled_indices is None:
             self.labeled_indices = range(len(adata))
         else:
@@ -207,11 +211,11 @@ class scPoliTrainer:
         self.unlabeled_prototype_training = unlabeled_prototype_training
         self.any_labeled_data = 1 in self.train_data.labeled_vector.unique().tolist()
         self.any_unlabeled_data = (
-            0 in self.train_data.labeled_vector.unique().tolist() 
+            0 in self.train_data.labeled_vector.unique().tolist()
             or self.model.unknown_ct_names is not None
         )
-        
-        #parse prototypes from model into right format
+
+        # parse prototypes from model into right format
         if self.model.prototypes_labeled["mean"] is not None:
             self.prototypes_labeled = self.model.prototypes_labeled["mean"]
             self.prototypes_labeled_cov = self.model.prototypes_labeled["cov"]
@@ -220,6 +224,9 @@ class scPoliTrainer:
             self.prototypes_labeled_cov = self.prototypes_labeled_cov.to(
                 device=self.device
             )
+
+        self.logger = logger
+        self.log_prefix = log_prefix
 
     def initialize_loaders(self):
         """
@@ -233,47 +240,66 @@ class scPoliTrainer:
 
         if self.use_stratified_sampling:
             # Create Sampler and Dataloaders
-            stratifier_weights = torch.tensor(self.train_data.stratifier_weights, device=self.device)
+            stratifier_weights = torch.tensor(
+                self.train_data.stratifier_weights, device=self.device
+            )
 
-            self.sampler = torch.utils.data.WeightedRandomSampler(stratifier_weights,
-                                                 num_samples=self.n_samples,
-                                                 replacement=True)
-            self.dataloader_train = torch.utils.data.DataLoader(dataset=self.train_data,
-                                                                batch_size=self.batch_size,
-                                                                sampler=self.sampler,
-                                                                collate_fn=custom_collate,
-                                                                num_workers=self.n_workers)
+            self.sampler = torch.utils.data.WeightedRandomSampler(
+                stratifier_weights, num_samples=self.n_samples, replacement=True
+            )
+            self.dataloader_train = torch.utils.data.DataLoader(
+                dataset=self.train_data,
+                batch_size=self.batch_size,
+                sampler=self.sampler,
+                collate_fn=custom_collate,
+                num_workers=self.n_workers,
+            )
         else:
-            self.dataloader_train = torch.utils.data.DataLoader(dataset=self.train_data,
-                                                                batch_size=self.batch_size,
-                                                                shuffle=True,
-                                                                collate_fn=custom_collate,
-                                                                num_workers=self.n_workers)
+            self.dataloader_train = torch.utils.data.DataLoader(
+                dataset=self.train_data,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=custom_collate,
+                num_workers=self.n_workers,
+            )
         if self.valid_data is not None:
             val_batch_size = self.batch_size
             if self.batch_size > len(self.valid_data):
                 val_batch_size = len(self.valid_data)
-            self.val_iters_per_epoch = int(np.ceil(len(self.valid_data) / self.batch_size))
-            self.dataloader_valid = torch.utils.data.DataLoader(dataset=self.valid_data,
-                                                                batch_size=val_batch_size,
-                                                                shuffle=True,
-                                                                collate_fn=custom_collate,
-                                                                num_workers=self.n_workers)
+            self.val_iters_per_epoch = int(
+                np.ceil(len(self.valid_data) / self.batch_size)
+            )
+            self.dataloader_valid = torch.utils.data.DataLoader(
+                dataset=self.valid_data,
+                batch_size=val_batch_size,
+                shuffle=True,
+                collate_fn=custom_collate,
+                num_workers=self.n_workers,
+            )
 
     def calc_alpha_coeff(self):
         """Calculates current alpha coefficient for alpha annealing.
 
-           Parameters
-           ----------
+        Parameters
+        ----------
 
-           Returns
-           -------
-           Current annealed alpha value
+        Returns
+        -------
+        Current annealed alpha value
         """
         if self.alpha_epoch_anneal is not None:
-            alpha_coeff = min(self.alpha_kl * self.epoch / self.alpha_epoch_anneal, self.alpha_kl)
+            alpha_coeff = min(
+                self.alpha_kl * self.epoch / self.alpha_epoch_anneal, self.alpha_kl
+            )
         elif self.alpha_iter_anneal is not None:
-            alpha_coeff = min((self.alpha_kl * (self.epoch * self.iters_per_epoch + self.iter) / self.alpha_iter_anneal), self.alpha_kl)
+            alpha_coeff = min(
+                (
+                    self.alpha_kl
+                    * (self.epoch * self.iters_per_epoch + self.iter)
+                    / self.alpha_iter_anneal
+                ),
+                self.alpha_kl,
+            )
         else:
             alpha_coeff = self.alpha_kl
         return alpha_coeff
@@ -311,10 +337,10 @@ class scPoliTrainer:
                 for key, batch in batch_data.items():
                     batch_data[key] = batch.to(self.device)
 
-                #loss calculation
+                # loss calculation
                 self.on_iteration(batch_data)
 
-            #validation of model, monitoring, early stopping
+            # validation of model, monitoring, early stopping
             self.on_epoch_end()
             if self.use_early_stopping:
                 if not self.check_early_stop():
@@ -331,7 +357,7 @@ class scPoliTrainer:
         self.training_time += time.time() - begin
 
     def on_iteration(self, batch_data):
-        #do not update any weight on first layers except condition weights
+        # do not update any weight on first layers except condition weights
         if self.model.freeze:
             for name, module in self.model.named_modules():
                 if isinstance(module, nn.BatchNorm1d):
@@ -339,20 +365,22 @@ class scPoliTrainer:
                         module.affine = False
                         module.track_running_stats = False
 
-        #calculate loss depending on trainer/model
+        # calculate loss depending on trainer/model
         self.current_loss = loss = self.loss(batch_data)
         self.optimizer.zero_grad()
 
         loss.backward()
-        #gradient Clipping
+        # gradient Clipping
         if self.clip_value > 0:
             torch.nn.utils.clip_grad_value_(self.model.parameters(), self.clip_value)
-        #if self.model.freeze == True:
+        # if self.model.freeze == True:
         #    if self.model.embedding:
         #        self.model.embedding.weight.grad[
         #            : self.model.n_reference_conditions
         #        ] = 0
         self.optimizer.step()
+
+        self.log(self.log_prefix + "train_loss", self.current_loss)
 
     def update_labeled_indices(self, labeled_indices):
         """
@@ -413,7 +441,7 @@ class scPoliTrainer:
             ]
             # check if model already has initialized prototypes
             # and then initialize new prototypes for new or unseen cell types in query
-            if self.prototypes_labeled is not None:  
+            if self.prototypes_labeled is not None:
                 with torch.no_grad():
                     if len(self.model.new_prototypes) > 0:
                         for value in self.model.new_prototypes:
@@ -428,8 +456,8 @@ class scPoliTrainer:
                             self.prototypes_labeled_cov = torch.cat(
                                 [self.prototypes_labeled_cov, prototype_cov]
                             )
-            else:  
-                #compute labeled prototypes
+            else:
+                # compute labeled prototypes
                 (
                     self.prototypes_labeled,
                     self.prototypes_labeled_cov,
@@ -444,7 +472,9 @@ class scPoliTrainer:
 
         # Init unlabeled prototypes if unlabeled data exists
         # Unknown ct names: list of strings that identify cells to ignore during training
-        if (self.any_unlabeled_data is True) and (self.unlabeled_prototype_training is True):
+        if (self.any_unlabeled_data is True) and (
+            self.unlabeled_prototype_training is True
+        ):
             lat_array = latent.cpu().detach().numpy()
 
             if self.clustering == "kmeans" and self.n_clusters is not None:
@@ -521,9 +551,13 @@ class scPoliTrainer:
         """
         Routine that happens at the beginning of every epoch. Model update step.
         """
-        if (self.epoch == self.pretraining_epochs) and (self.prototype_training is True):
+        if (self.epoch == self.pretraining_epochs) and (
+            self.prototype_training is True
+        ):
             self.initialize_prototypes()
-            if (self.any_unlabeled_data is True) and (self.unlabeled_prototype_training is True):
+            if (self.any_unlabeled_data is True) and (
+                self.unlabeled_prototype_training is True
+            ):
                 self.prototype_optim = torch.optim.Adam(
                     params=self.prototypes_unlabeled,
                     lr=lr,
@@ -542,13 +576,13 @@ class scPoliTrainer:
     def loss(self, total_batch=None):
         latent, recon_loss, kl_loss, mmd_loss = self.model(**total_batch)
 
-        #calculate classifier loss for labeled/unlabeled data
+        # calculate classifier loss for labeled/unlabeled data
         label_categories = total_batch["labeled"].unique().tolist()
         unweighted_prototype_loss = torch.tensor(0.0, device=self.device)
         unlabeled_loss = torch.tensor(0.0, device=self.device)
         labeled_loss = torch.tensor(0.0, device=self.device)
         if self.epoch >= self.pretraining_epochs:
-            #calculate prototype loss for all data
+            # calculate prototype loss for all data
             if self.prototypes_unlabeled is not None:
                 unlabeled_loss, _ = self.prototype_unlabeled_loss(
                     latent,
@@ -595,9 +629,19 @@ class scPoliTrainer:
         """
         self.model.eval()
 
-        if (
-            (self.epoch >= self.pretraining_epochs) 
-            and (self.prototype_training is True)
+        self.log(self.log_prefix + "epoch", self.epoch)
+
+        for metric in self.iter_logs:
+            if metric.startswith("val_"):
+                self.log(self.log_prefix + metric, self.iter_logs[metric][-1])
+            else:
+                self.log(
+                    self.log_prefix + "epoch_" + metric,
+                    self.iter_logs[metric][-1],
+                )
+
+        if (self.epoch >= self.pretraining_epochs) and (
+            self.prototype_training is True
         ):
             latent = self.get_latent_train()
             label_categories = self.train_data.labeled_vector.unique().tolist()
@@ -618,7 +662,9 @@ class scPoliTrainer:
                 )
 
             # Update unlabeled prototype positions
-            if (self.any_unlabeled_data is True) and (self.unlabeled_prototype_training is True):
+            if (self.any_unlabeled_data is True) and (
+                self.unlabeled_prototype_training is True
+            ):
                 for proto in self.prototypes_unlabeled:
                     proto.requires_grad = True
                 self.prototype_optim.zero_grad()
@@ -632,7 +678,7 @@ class scPoliTrainer:
                     proto.requires_grad = False
 
         self.model.train()
-        
+
         # Get Train Epoch Logs
         for key in self.iter_logs:
             self.logs["epoch_" + key].append(np.array(self.iter_logs[key]).mean())
@@ -733,7 +779,7 @@ class scPoliTrainer:
         """
         unique_labels = torch.unique(labels, sorted=True)
         dists = torch.cdist(latent, prototypes, p=self.p_prototype_loss)
-        
+
         loss = torch.tensor(0.0, device=self.device)
 
         # If data only contains 'unknown' celltypes
@@ -761,7 +807,7 @@ class scPoliTrainer:
             prototypes: Tensor
                 Tensor containing the means of the prototypes
         """
-        dists = torch.cdist(latent, prototypes, p=self.p_prototype_loss) 
+        dists = torch.cdist(latent, prototypes, p=self.p_prototype_loss)
         min_dist, y_hat = torch.min(dists, 1)
         args_uniq = torch.unique(y_hat, sorted=True)
         args_count = torch.stack([(y_hat == x_u).sum() for x_u in args_uniq])
@@ -796,10 +842,16 @@ class scPoliTrainer:
             self.best_state_dict = self.model.state_dict()
             self.best_epoch = self.epoch
 
-        continue_training, update_lr = self.early_stopping.step(self.logs[early_stopping_metric][-1])
+        continue_training, update_lr = self.early_stopping.step(
+            self.logs[early_stopping_metric][-1]
+        )
         if update_lr:
-            print(f'\nADJUSTED LR')
+            print(f"\nADJUSTED LR")
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] *= self.early_stopping.lr_factor
 
         return continue_training
+
+    def log(self, key, value):
+        if self.logger is not None:
+            self.logger.log({key: value})

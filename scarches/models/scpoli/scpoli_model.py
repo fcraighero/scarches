@@ -1,3 +1,5 @@
+from collections import defaultdict
+from copy import deepcopy
 from typing import Optional, Union
 
 import numpy as np
@@ -5,17 +7,15 @@ import pandas as pd
 import scanpy as sc
 import torch
 from anndata import AnnData
-from collections import defaultdict
 from scipy import sparse
-from sklearn.preprocessing import RobustScaler, MinMaxScaler
-from copy import deepcopy
+from sklearn.preprocessing import MinMaxScaler, RobustScaler
 
+from ...dataset import MultiConditionAnnotatedDataset
+from ...trainers.scpoli import scPoliTrainer
+from ...trainers.scpoli.trainer import custom_collate
 from ..base._base import BaseMixin
 from ..base._utils import _validate_var_names
 from .scpoli import scpoli
-from ...trainers.scpoli import scPoliTrainer
-from ...trainers.scpoli.trainer import custom_collate
-from ...dataset import MultiConditionAnnotatedDataset
 
 
 class scPoli(BaseMixin):
@@ -109,7 +109,6 @@ class scPoli(BaseMixin):
         else:
             self.condition_keys_ = condition_keys
 
-
         if isinstance(cell_type_keys, str):
             self.cell_type_keys_ = [cell_type_keys]
         else:
@@ -138,17 +137,21 @@ class scPoli(BaseMixin):
 
         if conditions_combined is None:
             if len(self.condition_keys_) > 1:
-                self.adata.obs['conditions_combined'] = adata.obs[condition_keys].apply(lambda x: '_'.join(x), axis=1)
+                self.adata.obs["conditions_combined"] = adata.obs[condition_keys].apply(
+                    lambda x: "_".join(x), axis=1
+                )
             else:
-                self.adata.obs['conditions_combined'] = adata.obs[condition_keys]
-            self.conditions_combined_ = self.adata.obs['conditions_combined'].unique().tolist()
+                self.adata.obs["conditions_combined"] = adata.obs[condition_keys]
+            self.conditions_combined_ = (
+                self.adata.obs["conditions_combined"].unique().tolist()
+            )
         else:
             self.conditions_combined_ = conditions_combined
 
         if obs_metadata is not None:
             self.obs_metadata_ = obs_metadata
         elif self.share_metadata_ is True:
-            self.obs_metadata_ = adata.obs.groupby('conditions_combined').first()
+            self.obs_metadata_ = adata.obs.groupby("conditions_combined").first()
         else:
             self.obs_metadata_ = []
 
@@ -180,7 +183,6 @@ class scPoli(BaseMixin):
                 if unknown_ct in self.cell_types_:
                     del self.cell_types_[unknown_ct]
 
-
         # store model parameters
         if hidden_layer_sizes is None:
             self.hidden_layer_sizes_ = [int(np.ceil(np.sqrt(adata.shape[1])))]
@@ -199,8 +201,9 @@ class scPoli(BaseMixin):
         if isinstance(embedding_dims, int):
             self.embedding_dims_ = [embedding_dims] * len(self.condition_keys_)
         else:
-            assert len(embedding_dims) == len(self.condition_keys_), \
-                "Embedding dimensions passed do not match condition keys"
+            assert len(embedding_dims) == len(
+                self.condition_keys_
+            ), "Embedding dimensions passed do not match condition keys"
             self.embedding_dims_ = embedding_dims
         self.embedding_max_norm_ = embedding_max_norm
 
@@ -261,10 +264,12 @@ class scPoli(BaseMixin):
         eta: float = 1,
         lr: float = 1e-3,
         eps: float = 0.01,
-        alpha_epoch_anneal = 1e2,
+        alpha_epoch_anneal=1e2,
         reload_best: bool = False,
         prototype_training: Optional[bool] = True,
         unlabeled_prototype_training: Optional[bool] = True,
+        logger=None,
+        log_prefix="",
         **kwargs,
     ):
         """Train the model.
@@ -289,7 +294,6 @@ class scPoli(BaseMixin):
         elif pretraining_epochs is None:
             pretraining_epochs = int(np.floor(n_epochs * 0.9))
 
-
         self.trainer = scPoliTrainer(
             self.model,
             self.adata,
@@ -302,6 +306,8 @@ class scPoli(BaseMixin):
             unlabeled_prototype_training=self.unlabeled_prototype_training_,
             eta=eta,
             alpha_epoch_anneal=alpha_epoch_anneal,
+            logger=logger,
+            log_prefix=log_prefix,
             **kwargs,
         )
         self.trainer.train(n_epochs, lr, eps)
@@ -345,7 +351,7 @@ class scPoli(BaseMixin):
                     labels[query_conditions == condition] = label
                 label_tensor.append(labels)
             c = torch.tensor(label_tensor, device=device).T
- 
+
         latents = []
         # batch the latent transformation process
         indices = torch.arange(x.shape[0])
@@ -355,9 +361,7 @@ class scPoli(BaseMixin):
             if sparse.issparse(x_batch):
                 x_batch = x_batch.toarray()
             x_batch = torch.tensor(x_batch, device=device).float()
-            latent = self.model.get_latent(
-                x_batch, c[batch, :], mean
-            )
+            latent = self.model.get_latent(x_batch, c[batch, :], mean)
             latents += [latent.cpu().detach()]
         latents = torch.cat(latents)
         return np.array(latents)
@@ -366,21 +370,23 @@ class scPoli(BaseMixin):
         """
         Returns anndata object of the conditional embeddings
         """
-        embeddings = [self.model.embeddings[i].weight.cpu().detach().numpy() for i in range(len(self.model.embeddings))]
+        embeddings = [
+            self.model.embeddings[i].weight.cpu().detach().numpy()
+            for i in range(len(self.model.embeddings))
+        ]
         adata_emb = {}
         for i, cond in enumerate(self.conditions_.keys()):
-            adata_emb[cond] =  sc.AnnData(
-                X=embeddings[i],
-                obs=pd.DataFrame(index=self.conditions_[cond])
+            adata_emb[cond] = sc.AnnData(
+                X=embeddings[i], obs=pd.DataFrame(index=self.conditions_[cond])
             )
-        #if self.share_metadata_:
+        # if self.share_metadata_:
         #    adata_emb.obs = self.obs_metadata_
         if len(self.condition_keys_) == 1:
             return adata_emb[self.condition_keys_[0]]
         else:
             return adata_emb
 
-    #def get_combined_conditional_embeddings(self):
+    # def get_combined_conditional_embeddings(self):
     #    """
     #    Returns anndata object of the conditional embeddings
     #    """
@@ -404,9 +410,8 @@ class scPoli(BaseMixin):
     #            obs=unique_conditions
     #        )
 
-
-        #if self.share_metadata_:
-        #    adata_emb.obs = self.obs_metadata_
+    # if self.share_metadata_:
+    #    adata_emb.obs = self.obs_metadata_
     #    return adata_emb_combined
 
     def classify(
@@ -434,7 +439,9 @@ class scPoli(BaseMixin):
 
         """
 
-        assert self.prototypes_labeled_['mean'] is not None, f"Model was trained without prototypes"
+        assert (
+            self.prototypes_labeled_["mean"] is not None
+        ), f"Model was trained without prototypes"
 
         device = next(self.model.parameters()).device
         self.model.eval()
@@ -510,7 +517,11 @@ class scPoli(BaseMixin):
 
             if scale_uncertainties is True:
                 full_uncert = RobustScaler().fit_transform(full_uncert.reshape(-1, 1))
-                full_uncert = MinMaxScaler(feature_range=(0, 1)).fit_transform(full_uncert).reshape(-1)
+                full_uncert = (
+                    MinMaxScaler(feature_range=(0, 1))
+                    .fit_transform(full_uncert)
+                    .reshape(-1)
+                )
 
             results[cell_type_key] = {
                 "preds": np.array(full_pred_names),
@@ -633,9 +644,7 @@ class scPoli(BaseMixin):
             )
             return
         prototypes_info = sc.AnnData(prototypes)
-        prototypes_info.obs['batch'] = np.array(
-            (prototypes.shape[0] * [batch_name])
-        )
+        prototypes_info.obs["batch"] = np.array((prototypes.shape[0] * [batch_name]))
 
         results = self.classify(
             prototypes,
@@ -668,8 +677,8 @@ class scPoli(BaseMixin):
         if adata.n_vars != dct["input_dim_"]:
             raise ValueError("Incorrect var dimension")
 
-        #adata_conditions = adata.obs[dct["condition_key_"]].unique().tolist()
-        #if not set(adata_conditions).issubset(dct["conditions_"]):
+        # adata_conditions = adata.obs[dct["condition_key_"]].unique().tolist()
+        # if not set(adata_conditions).issubset(dct["conditions_"]):
         #    raise ValueError("Incorrect conditions")
 
     @classmethod
@@ -685,8 +694,8 @@ class scPoli(BaseMixin):
             "labeled_indices": dct["labeled_indices_"],
             "prototypes_labeled": dct["prototypes_labeled_"],
             "prototypes_unlabeled": dct["prototypes_unlabeled_"],
-            #"prototype_training": dct["prototype_training_"],
-            #"unlabeled_prototype_training": dct["unlabeled_prototype_training_"],
+            # "prototype_training": dct["prototype_training_"],
+            # "unlabeled_prototype_training": dct["unlabeled_prototype_training_"],
             "hidden_layer_sizes": dct["hidden_layer_sizes_"],
             "latent_dim": dct["latent_dim_"],
             "dr_rate": dct["dr_rate_"],
@@ -715,7 +724,7 @@ class scPoli(BaseMixin):
         freeze_expression: bool = True,
         remove_dropout: bool = True,
         return_new_conditions: bool = False,
-        map_location = None,
+        map_location=None,
     ):
         """Transfer Learning function for new data. Uses old trained model and expands it for new conditions.
 
@@ -744,7 +753,9 @@ class scPoli(BaseMixin):
              New SCPOLI model to train on query data.
         """
         if isinstance(reference_model, str):
-            attr_dict, model_state_dict, var_names = cls._load_params(reference_model, map_location)
+            attr_dict, model_state_dict, var_names = cls._load_params(
+                reference_model, map_location
+            )
             adata = _validate_var_names(adata, var_names)
         else:
             attr_dict = deepcopy(reference_model._get_public_attributes())
@@ -772,16 +783,18 @@ class scPoli(BaseMixin):
 
         conditions_combined = init_params["conditions_combined"]
         if len(condition_keys) > 1:
-            adata.obs['conditions_combined'] = adata.obs[condition_keys].apply(lambda x: '_'.join(x), axis=1)
+            adata.obs["conditions_combined"] = adata.obs[condition_keys].apply(
+                lambda x: "_".join(x), axis=1
+            )
         else:
-            adata.obs['conditions_combined'] = adata.obs[condition_keys]
-        new_conditions_combined = adata.obs['conditions_combined'].unique().tolist()
+            adata.obs["conditions_combined"] = adata.obs[condition_keys]
+        new_conditions_combined = adata.obs["conditions_combined"].unique().tolist()
         for item in new_conditions_combined:
             if item not in conditions_combined:
                 conditions_combined.append(item)
 
         obs_metadata = attr_dict["obs_metadata_"]
-        new_obs_metadata = adata.obs.groupby('conditions_combined').first()
+        new_obs_metadata = adata.obs.groupby("conditions_combined").first()
         obs_metadata = pd.concat([obs_metadata, new_obs_metadata])
         init_params["obs_metadata"] = obs_metadata
 
@@ -815,7 +828,7 @@ class scPoli(BaseMixin):
         init_params["unknown_ct_names"] = unknown_ct_names
         new_model = cls(adata, **init_params)
         new_model.model.n_reference_conditions = n_reference_conditions
-        #new_model.obs_metadata_ = obs_metadata
+        # new_model.obs_metadata_ = obs_metadata
         new_model._load_expand_params_from_dict(model_state_dict)
 
         if freeze:
@@ -847,19 +860,19 @@ class scPoli(BaseMixin):
         unknown_ct_names: Optional[list] = None,
         train_epochs: int = 0,
         batch_size: int = 128,
-        subsample: float = 1.,
+        subsample: float = 1.0,
         force_cuda: bool = True,
-        **kwargs
+        **kwargs,
     ):
-        assert subsample > 0. and subsample <= 1.
+        assert subsample > 0.0 and subsample <= 1.0
 
         model, new_conditions = cls.load_query_data(
             adata,
             reference_model,
             labeled_indices,
             unknown_ct_names,
-            freeze = train_epochs>0,
-            return_new_conditions=True
+            freeze=train_epochs > 0,
+            return_new_conditions=True,
         )
 
         assert len(model.condition_keys_) == 1
@@ -876,7 +889,7 @@ class scPoli(BaseMixin):
         for new_cond in new_conditions_list:
             print(f"Processing {new_cond}.")
             adata_cond = adata[adata.obs[cond_key] == new_cond]
-            if subsample < 1.:
+            if subsample < 1.0:
                 n_obs = len(adata_cond)
                 n_ss = int(subsample * n_obs)
                 idx = np.random.choice(n_obs, n_ss, replace=False)
@@ -887,15 +900,21 @@ class scPoli(BaseMixin):
                 if old_cond in new_conditions_list:
                     continue
                 condition_encoders = deepcopy(model.model.condition_encoders)
-                conditions_combined_encoder = deepcopy(model.model.conditions_combined_encoder)
-                condition_encoders[cond_key][new_cond] = condition_encoders[cond_key][old_cond]
-                conditions_combined_encoder[new_cond] = conditions_combined_encoder[old_cond]
+                conditions_combined_encoder = deepcopy(
+                    model.model.conditions_combined_encoder
+                )
+                condition_encoders[cond_key][new_cond] = condition_encoders[cond_key][
+                    old_cond
+                ]
+                conditions_combined_encoder[new_cond] = conditions_combined_encoder[
+                    old_cond
+                ]
 
                 recon_loss = model.get_recon_loss(
                     adata_cond,
                     batch_size,
                     condition_encoders,
-                    conditions_combined_encoder
+                    conditions_combined_encoder,
                 )
                 print(f"  Using {old_cond}, recon loss {recon_loss}.")
                 if min_recon_loss is None or recon_loss < min_recon_loss:
@@ -907,9 +926,13 @@ class scPoli(BaseMixin):
         embeddings = model.model.embeddings[0].weight.data
         theta = None if model.model.theta is None else model.model.theta.data
         for new_cond in mapping:
-            embeddings[condition_encoder[new_cond]] = embeddings[condition_encoder[mapping[new_cond]]]
+            embeddings[condition_encoder[new_cond]] = embeddings[
+                condition_encoder[mapping[new_cond]]
+            ]
             if theta is not None:
-                theta[:, conditions_combined_encoder[new_cond]] = theta[:, conditions_combined_encoder[mapping[new_cond]]]
+                theta[:, conditions_combined_encoder[new_cond]] = theta[
+                    :, conditions_combined_encoder[mapping[new_cond]]
+                ]
 
         if train_epochs > 0:
             model.train(n_epochs=train_epochs, **kwargs)
@@ -921,23 +944,28 @@ class scPoli(BaseMixin):
         adata: AnnData,
         batch_size: int = 128,
         condition_encoders: Optional[dict] = None,
-        conditions_combined_encoder: Optional[dict] = None
+        conditions_combined_encoder: Optional[dict] = None,
     ):
         ds = MultiConditionAnnotatedDataset(
             adata,
             self.condition_keys_,
-            self.model.condition_encoders if condition_encoders is None else condition_encoders,
-            self.model.conditions_combined_encoder if conditions_combined_encoder is None else conditions_combined_encoder,
+            (
+                self.model.condition_encoders
+                if condition_encoders is None
+                else condition_encoders
+            ),
+            (
+                self.model.conditions_combined_encoder
+                if conditions_combined_encoder is None
+                else conditions_combined_encoder
+            ),
         )
         dl = torch.utils.data.DataLoader(
-            dataset=ds,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=custom_collate
+            dataset=ds, batch_size=batch_size, shuffle=False, collate_fn=custom_collate
         )
 
         device = next(self.model.parameters()).device
-        recon_loss = 0.
+        recon_loss = 0.0
         with torch.no_grad():
             for batch in dl:
                 batch = {k: v.to(device) for k, v in batch.items()}

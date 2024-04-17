@@ -2,65 +2,80 @@ from collections import Counter
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 from scipy import sparse
+from torch.utils.data import Dataset
 
 from ._utils import label_encoder, remove_sparsity
 
+
 class MultiConditionAnnotatedDataset(Dataset):
     """Dataset handler for scPoli model and trainer.
-       Parameters
-       ----------
-       adata: : `~anndata.AnnData`
-            Annotated data matrix.
-       condition_key: String
-            column name of conditions in `adata.obs` data frame.
-       condition_encoder: Dict
-            dictionary of encoded conditions.
-       cell_type_keys: List
-            List of column names of different celltype hierarchies in `adata.obs` data frame.
-       cell_type_encoder: Dict
-            dictionary of encoded celltypes.
+    Parameters
+    ----------
+    adata: : `~anndata.AnnData`
+         Annotated data matrix.
+    condition_key: String
+         column name of conditions in `adata.obs` data frame.
+    condition_encoder: Dict
+         dictionary of encoded conditions.
+    cell_type_keys: List
+         List of column names of different celltype hierarchies in `adata.obs` data frame.
+    cell_type_encoder: Dict
+         dictionary of encoded celltypes.
     """
-    def __init__(self,
-                 adata,
-                 condition_keys=None,
-                 condition_encoders=None,
-                 conditions_combined_encoder=None,
-                 cell_type_keys=None,
-                 cell_type_encoder=None,
-                 labeled_array=None
-                 ):
+
+    def __init__(
+        self,
+        adata,
+        condition_keys=None,
+        condition_encoders=None,
+        conditions_combined_encoder=None,
+        cell_type_keys=None,
+        cell_type_encoder=None,
+        labeled_array=None,
+        postpone_tensor: bool = True,
+    ):
 
         self.condition_keys = condition_keys
         self.condition_encoders = condition_encoders
         self.conditions_combined_encoder = conditions_combined_encoder
         self.cell_type_keys = cell_type_keys
         self.cell_type_encoder = cell_type_encoder
-        self._is_sparse = sparse.issparse(adata.X)
-        self.data = adata.X if self._is_sparse else torch.tensor(adata.X, dtype=torch.float32)
+        self._postpone_tensor = postpone_tensor
+        self.data = (
+            adata.X
+            if self._postpone_tensor
+            else torch.tensor(adata.X, dtype=torch.float32)
+        )
 
         size_factors = np.ravel(adata.X.sum(1))
 
         self.size_factors = torch.tensor(size_factors)
 
-        labeled_array = np.zeros((len(adata), 1)) if labeled_array is None else labeled_array
+        labeled_array = (
+            np.zeros((len(adata), 1)) if labeled_array is None else labeled_array
+        )
         self.labeled_vector = torch.tensor(labeled_array)
 
         # Encode condition strings to integer
         if self.condition_keys is not None:
-            self.conditions = [label_encoder(
-                adata,
-                encoder=self.condition_encoders[condition_keys[i]],
-                condition_key=condition_keys[i],
-            ) for i in range(len(self.condition_encoders))]
+            self.conditions = [
+                label_encoder(
+                    adata,
+                    encoder=self.condition_encoders[condition_keys[i]],
+                    condition_key=condition_keys[i],
+                )
+                for i in range(len(self.condition_encoders))
+            ]
             self.conditions = torch.tensor(self.conditions, dtype=torch.long).T
             self.conditions_combined = label_encoder(
                 adata,
                 encoder=self.conditions_combined_encoder,
-                condition_key='conditions_combined'
+                condition_key="conditions_combined",
             )
-            self.conditions_combined=torch.tensor(self.conditions_combined, dtype=torch.long)
+            self.conditions_combined = torch.tensor(
+                self.conditions_combined, dtype=torch.long
+            )
 
         # Encode cell type strings to integer
         if self.cell_type_keys is not None:
@@ -79,8 +94,10 @@ class MultiConditionAnnotatedDataset(Dataset):
     def __getitem__(self, index):
         outputs = dict()
 
-        if self._is_sparse:
-            x = torch.tensor(np.squeeze(self.data[index].toarray()), dtype=torch.float32)
+        if self._postpone_tensor:
+            x = torch.tensor(
+                np.squeeze(self.data[index].toarray()), dtype=torch.float32
+            )
         else:
             x = self.data[index]
         outputs["x"] = x
@@ -121,10 +138,9 @@ class MultiConditionAnnotatedDataset(Dataset):
     @property
     def stratifier_weights(self):
         conditions = self.conditions.detach().cpu().numpy().squeeze()
-        condition_coeff = 1. / len(conditions)
+        condition_coeff = 1.0 / len(conditions)
 
         condition2count = Counter(conditions)
         counts = np.array([condition2count[cond] for cond in conditions])
         weights = condition_coeff / counts
         return weights.astype(float)
-
